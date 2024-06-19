@@ -38,57 +38,61 @@ async function init() {
   const chainContext = await nic.consensusGetChainContext()
 
   async function poll() {
-    const consensusBalance = await getConsensusBalance(consensusAddress)
-    const sapphireBalance = await getSapphireBalance(sapphireAddress)
-    console.log({ consensusBalance, sapphireBalance })
+    try {
+      const consensusBalance = await getConsensusBalance(consensusAddress)
+      const sapphireBalance = await getSapphireBalance(sapphireAddress)
+      console.log({ consensusBalance, sapphireBalance })
 
-    window.print_mnemonic.textContent = mnemonic
-    window.print_consensus_account.textContent = consensusAddress + ' balance: ' + consensusBalance
-    window.print_sapphire_account.textContent = sapphireAddress + ' balance: ' + sapphireBalance
-    if (consensusBalance <= 0n) {
-      setTimeout(poll, 10000)
-      return
-    }
+      window.print_mnemonic.textContent = mnemonic
+      window.print_consensus_account.textContent = consensusAddress + ' balance: ' + consensusBalance
+      window.print_sapphire_account.textContent = sapphireAddress + ' balance: ' + sapphireBalance
+      if (consensusBalance <= 0n) {
+        setTimeout(poll, 10000)
+        return
+      }
 
-    console.log('depositable', consensusBalance)
-    const amountToDeposit = consensusBalance
+      console.log('depositable', consensusBalance)
+      const amountToDeposit = consensusBalance
 
-    // setAllowance to sapphireConfig.mainnet.address
-    const tw = oasis.staking.allowWrapper()
-    tw.setNonce(await getConsensusNonce(consensusAddress))
-    tw.setFeeAmount(oasis.quantity.fromBigInt(0n))
-    tw.setBody({
-      beneficiary: oasis.staking.addressFromBech32(sapphireConfig.mainnet.address),
-      negative: false,
-      amount_change: oasis.quantity.fromBigInt(amountToDeposit), // TODO: this assumes that initial allowance is 0
-    })
-    const gas = await tw.estimateGas(nic, signer.public())
-    tw.setFeeGas(gas)
-    await tw.sign(new oasis.signature.BlindContextSigner(signer), chainContext)
-    await tw.submit(nic)
-
-    // Deposit into Sapphire
-    const rtw = new oasisRT.consensusAccounts.Wrapper(
-      oasis.misc.fromHex(sapphireConfig.mainnet.runtimeId),
-    ).callDeposit()
-    rtw
-      .setBody({
-        amount: [oasis.quantity.fromBigInt(amountToDeposit * multiplyConsensusToSapphire), oasisRT.token.NATIVE_DENOMINATION],
-        to: oasis.staking.addressFromBech32(await getEvmBech32Address(sapphireAddress)),
+      // setAllowance to sapphireConfig.mainnet.address
+      const tw = oasis.staking.allowWrapper()
+      tw.setNonce(await getConsensusNonce(consensusAddress))
+      tw.setFeeAmount(oasis.quantity.fromBigInt(0n))
+      tw.setBody({
+        beneficiary: oasis.staking.addressFromBech32(sapphireConfig.mainnet.address),
+        negative: false,
+        amount_change: oasis.quantity.fromBigInt(amountToDeposit), // TODO: this assumes that initial allowance is 0
       })
-      .setFeeAmount([oasis.quantity.fromBigInt(0n), oasisRT.token.NATIVE_DENOMINATION])
-      .setFeeGas(sapphireConfig.feeGas)
-      .setFeeConsensusMessages(1)
-      .setSignerInfo([
-        {
-          address_spec: {
-            signature: { ed25519: signer.public() },
+      const gas = await tw.estimateGas(nic, signer.public())
+      tw.setFeeGas(gas)
+      await tw.sign(new oasis.signature.BlindContextSigner(signer), chainContext)
+      await tw.submit(nic)
+
+      // Deposit into Sapphire
+      const rtw = new oasisRT.consensusAccounts.Wrapper(
+        oasis.misc.fromHex(sapphireConfig.mainnet.runtimeId),
+      ).callDeposit()
+      rtw
+        .setBody({
+          amount: [oasis.quantity.fromBigInt(amountToDeposit * multiplyConsensusToSapphire), oasisRT.token.NATIVE_DENOMINATION],
+          to: oasis.staking.addressFromBech32(await getEvmBech32Address(sapphireAddress)),
+        })
+        .setFeeAmount([oasis.quantity.fromBigInt(0n), oasisRT.token.NATIVE_DENOMINATION])
+        .setFeeGas(sapphireConfig.feeGas)
+        .setFeeConsensusMessages(1)
+        .setSignerInfo([
+          {
+            address_spec: {
+              signature: { ed25519: signer.public() },
+            },
+            nonce: await getSapphireNonce(consensusAddress),
           },
-          nonce: await getSapphireNonce(consensusAddress),
-        },
-      ])
-    await rtw.sign([new oasis.signature.BlindContextSigner(signer)], chainContext)
-    await rtw.submit(nic)
+        ])
+      await rtw.sign([new oasis.signature.BlindContextSigner(signer)], chainContext)
+      await rtw.submit(nic)
+    } catch (err) {
+      alert(err)
+    }
 
     poll()
   }
@@ -100,7 +104,7 @@ async function init() {
     event.returnValue = true
   })
 }
-init()
+init().catch((err) => alert(err))
 
 // Utils
 
