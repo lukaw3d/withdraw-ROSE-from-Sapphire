@@ -1,0 +1,15 @@
+{
+  "license": "Apache-2.0",
+  "scripts": {
+    "start": "parcel src/index.html",
+    "build": "parcel build --dist-dir build src/index.html"
+  },
+  "dependencies": {
+    "@oasisprotocol/client": "^1.1.0",
+    "@oasisprotocol/client-rt": "^1.1.0"
+  },
+  "devDependencies": {
+    "parcel": "^2.12.0",
+    "process": "^0.11.10"
+  }
+}
