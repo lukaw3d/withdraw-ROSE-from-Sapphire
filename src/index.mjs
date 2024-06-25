@@ -91,6 +91,7 @@ async function init() {
       await rtw.sign([new oasis.signature.BlindContextSigner(signer)], chainContext)
       await rtw.submit(nic)
     } catch (err) {
+      console.error(err)
       alert(err)
     }
 
@@ -104,7 +105,10 @@ async function init() {
     event.returnValue = true
   })
 }
-init().catch((err) => alert(err))
+init().catch((err) => {
+  console.error(err)
+  alert(err)
+})
 
 // Utils
 
