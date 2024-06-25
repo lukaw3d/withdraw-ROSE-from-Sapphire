@@ -1,8 +1,8 @@
 {
   "license": "Apache-2.0",
   "scripts": {
-    "start": "parcel --public-url /deposit-ROSE-to-Sapphire/ src/index.html",
-    "build": "parcel build --public-url /deposit-ROSE-to-Sapphire/ src/index.html"
+    "start": "parcel --public-url /withdraw-ROSE-from-Sapphire/ src/index.html",
+    "build": "parcel build --public-url /withdraw-ROSE-from-Sapphire/ src/index.html"
   },
   "dependencies": {
     "@ethereumjs/util": "^9.0.3",

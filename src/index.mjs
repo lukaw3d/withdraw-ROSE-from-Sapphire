@@ -1,6 +1,7 @@
 // @ts-check
 import * as oasis from '@oasisprotocol/client'
 import * as oasisRT from '@oasisprotocol/client-rt'
+import { bytesToHex, privateToAddress, toChecksumAddress } from '@ethereumjs/util'
 
 const sapphireConfig = {
   mainnet: {
@@ -21,71 +22,54 @@ const consensusConfig = {
 const multiplyConsensusToSapphire = 10n ** BigInt(sapphireConfig.decimals - consensusConfig.decimals)
 
 async function init() {
-  const mnemonic = oasis.hdkey.HDKey.generateMnemonic(256)
-  const signerKeyPair = await oasis.hdkey.HDKey.getAccountSigner(mnemonic, 0)
-  const signer = oasis.signature.NaclSigner.fromSecret(signerKeyPair.secretKey, 'this key is not important')
+  const signer = oasisRT.signatureSecp256k1.EllipticSigner.fromRandom('this key is not important')
+  const sapphireAddress = privateToEthAddress(signer.key.getPrivate('hex'))
+
   const consensusAddress =
     /** @type {`oasis1${string}`} */
-    (await publicKeyToAddress(signerKeyPair.publicKey))
+    (prompt('Consensus address you want to send ROSE to', 'oasis1') || '')
+  if (!isValidOasisAddress(consensusAddress)) throw new Error('Invalid consensus address')
 
-  const sapphireAddress =
-    /** @type {`0x${string}`} */
-    (prompt('Sapphire address you want to send ROSE to', '0x') || '')
-  if (!sapphireAddress) throw new Error('Invalid sapphire address')
-  if (!/^0x[0-9a-fA-F]{40}$/.test(sapphireAddress)) throw new Error('Invalid sapphire address')
 
   const nic = new oasis.client.NodeInternal('https://grpc.oasis.io')
   const chainContext = await nic.consensusGetChainContext()
 
   async function poll() {
     try {
-      const consensusBalance = await getConsensusBalance(consensusAddress)
       const sapphireBalance = await getSapphireBalance(sapphireAddress)
-      console.log({ consensusBalance, sapphireBalance })
+      const consensusBalance = await getConsensusBalance(consensusAddress)
+      console.log({ sapphireBalance, consensusBalance })
 
-      window.print_mnemonic.textContent = mnemonic
-      window.print_consensus_account.textContent = consensusAddress + ' balance: ' + consensusBalance
+      window.print_privatekey.textContent = signer.key.getPrivate('hex')
       window.print_sapphire_account.textContent = sapphireAddress + ' balance: ' + sapphireBalance
-      if (consensusBalance <= 0n) {
+      window.print_consensus_account.textContent = consensusAddress + ' balance: ' + consensusBalance
+      if (sapphireBalance <= 0n) {
         setTimeout(poll, 10000)
         return
       }
 
-      console.log('depositable', consensusBalance)
-      const amountToDeposit = consensusBalance
+      console.log('withdrawable', sapphireBalance)
+      const feeAmount = sapphireConfig.gasPrice * sapphireConfig.feeGas * multiplyConsensusToSapphire
+      const amountToWithdraw = sapphireBalance - feeAmount
 
-      // setAllowance to sapphireConfig.mainnet.address
-      const tw = oasis.staking.allowWrapper()
-      tw.setNonce(await getConsensusNonce(consensusAddress))
-      tw.setFeeAmount(oasis.quantity.fromBigInt(0n))
-      tw.setBody({
-        beneficiary: oasis.staking.addressFromBech32(sapphireConfig.mainnet.address),
-        negative: false,
-        amount_change: oasis.quantity.fromBigInt(amountToDeposit), // TODO: this assumes that initial allowance is 0
-      })
-      const gas = await tw.estimateGas(nic, signer.public())
-      tw.setFeeGas(gas)
-      await tw.sign(new oasis.signature.BlindContextSigner(signer), chainContext)
-      await tw.submit(nic)
-
-      // Deposit into Sapphire
+      // Withdraw into Sapphire
       const rtw = new oasisRT.consensusAccounts.Wrapper(
         oasis.misc.fromHex(sapphireConfig.mainnet.runtimeId),
-      ).callDeposit()
+      ).callWithdraw()
       rtw
         .setBody({
-          amount: [oasis.quantity.fromBigInt(amountToDeposit * multiplyConsensusToSapphire), oasisRT.token.NATIVE_DENOMINATION],
-          to: oasis.staking.addressFromBech32(await getEvmBech32Address(sapphireAddress)),
+          amount: [oasis.quantity.fromBigInt(amountToWithdraw), oasisRT.token.NATIVE_DENOMINATION],
+          to: oasis.staking.addressFromBech32(consensusAddress),
         })
-        .setFeeAmount([oasis.quantity.fromBigInt(0n), oasisRT.token.NATIVE_DENOMINATION])
+        .setFeeAmount([oasis.quantity.fromBigInt(feeAmount), oasisRT.token.NATIVE_DENOMINATION])
         .setFeeGas(sapphireConfig.feeGas)
         .setFeeConsensusMessages(1)
         .setSignerInfo([
           {
             address_spec: {
-              signature: { ed25519: signer.public() },
+              signature: { secp256k1eth: signer.public() },
             },
-            nonce: await getSapphireNonce(consensusAddress),
+            nonce: await getSapphireNonce(await getEvmBech32Address(sapphireAddress)),
           },
         ])
       await rtw.sign([new oasis.signature.BlindContextSigner(signer)], chainContext)
@@ -112,10 +96,26 @@ init().catch((err) => {
 
 // Utils
 
-/** @param {Uint8Array} publicKey */
-async function publicKeyToAddress(publicKey) {
-  const data = await oasis.staking.addressFromPublicKey(publicKey)
-  return oasis.staking.addressToBech32(data)
+/** @param {`oasis1${string}`} oasisAddress */
+function isValidOasisAddress(oasisAddress) {
+  try {
+    oasis.staking.addressFromBech32(oasisAddress)
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
+/** @param {string} ethPrivateKey */
+function privateToEthAddress(ethPrivateKey) {
+  return /** @type {`0x${string}`} */ (
+    toChecksumAddress(bytesToHex(privateToAddress(hexToBuffer(ethPrivateKey))))
+  )
+}
+
+/** @param {string} value */
+function hexToBuffer(value) {
+  return Buffer.from(value, 'hex')
 }
 
 /** @param {`0x${string}`} evmAddress */
@@ -126,7 +126,7 @@ async function getEvmBech32Address(evmAddress) {
     oasisRT.address.V0_SECP256K1ETH_CONTEXT_VERSION,
     evmBytes,
   )
-  const bech32Address = oasisRT.address.toBech32(address)
+  const bech32Address = /** @type {`oasis1${string}`}*/ (oasisRT.address.toBech32(address))
   return bech32Address
 }
 
