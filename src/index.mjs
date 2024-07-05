@@ -2,6 +2,7 @@
 import * as oasis from '@oasisprotocol/client'
 import * as oasisRT from '@oasisprotocol/client-rt'
 import { bytesToHex, privateToAddress, toChecksumAddress } from '@ethereumjs/util'
+import { hdkey } from '@ethereumjs/wallet'
 
 const sapphireConfig = {
   mainnet: {
@@ -22,8 +23,15 @@ const consensusConfig = {
 const multiplyConsensusToSapphire = 10n ** BigInt(sapphireConfig.decimals - consensusConfig.decimals)
 
 async function init() {
-  const signer = oasisRT.signatureSecp256k1.EllipticSigner.fromRandom('this key is not important')
+  const mnemonic = oasis.hdkey.HDKey.generateMnemonic(256)
+
+  const signer = oasisRT.signatureSecp256k1.EllipticSigner.fromPrivate(hdkey.EthereumHDKey.fromMnemonic(mnemonic).derivePath("m/44'/60'/0'/0/0").getWallet().getPrivateKey(), 'this key is not important')
   const sapphireAddress = privateToEthAddress(signer.key.getPrivate('hex'))
+
+  const intermediateConsensusSigner = oasis.signature.NaclSigner.fromSecret((await oasis.hdkey.HDKey.getAccountSigner(mnemonic, 0)).secretKey, 'this key is not important')
+  const intermediateConsensusAddress =
+    /** @type {`oasis1${string}`} */
+    (await publicKeyToAddress(intermediateConsensusSigner.public()))
 
   const consensusAddress =
     /** @type {`oasis1${string}`} */
@@ -34,52 +42,76 @@ async function init() {
   const nic = new oasis.client.NodeInternal('https://grpc.oasis.io')
   const chainContext = await nic.consensusGetChainContext()
 
+  async function updateBalances() {
+    const sapphireBalance = await getSapphireBalance(sapphireAddress)
+    const intermediateConsensusBalance = await getConsensusBalance(intermediateConsensusAddress)
+    const consensusBalance = await getConsensusBalance(consensusAddress)
+
+    window.print_mnemonic.textContent = mnemonic
+    window.print_sapphire_account.textContent = sapphireAddress + '   balance: ' + sapphireBalance
+    window.print_intermediate_consensus_account.textContent = intermediateConsensusAddress + '   balance: ' + intermediateConsensusBalance
+    window.print_consensus_account.textContent = consensusAddress + '   balance: ' + consensusBalance
+    return { sapphireBalance, intermediateConsensusBalance, consensusBalance }
+  }
+
   async function poll() {
     try {
-      const sapphireBalance = await getSapphireBalance(sapphireAddress)
-      const consensusBalance = await getConsensusBalance(consensusAddress)
-      console.log({ sapphireBalance, consensusBalance })
+      const { sapphireBalance, intermediateConsensusBalance, consensusBalance } = await updateBalances()
+      console.log({ sapphireBalance, intermediateConsensusBalance, consensusBalance })
+      if (sapphireBalance > 0n) {
+        console.log('withdrawable', sapphireBalance)
+        const feeAmount = sapphireConfig.gasPrice * sapphireConfig.feeGas * multiplyConsensusToSapphire
+        const amountToWithdraw = sapphireBalance - feeAmount
 
-      window.print_privatekey.textContent = signer.key.getPrivate('hex')
-      window.print_sapphire_account.textContent = sapphireAddress + ' balance: ' + sapphireBalance
-      window.print_consensus_account.textContent = consensusAddress + ' balance: ' + consensusBalance
-      if (sapphireBalance <= 0n) {
-        setTimeout(poll, 10000)
-        return
-      }
-
-      console.log('withdrawable', sapphireBalance)
-      const feeAmount = sapphireConfig.gasPrice * sapphireConfig.feeGas * multiplyConsensusToSapphire
-      const amountToWithdraw = sapphireBalance - feeAmount
-
-      // Withdraw into Sapphire
-      const rtw = new oasisRT.consensusAccounts.Wrapper(
-        oasis.misc.fromHex(sapphireConfig.mainnet.runtimeId),
-      ).callWithdraw()
-      rtw
-        .setBody({
-          amount: [oasis.quantity.fromBigInt(amountToWithdraw), oasisRT.token.NATIVE_DENOMINATION],
-          to: oasis.staking.addressFromBech32(consensusAddress),
-        })
-        .setFeeAmount([oasis.quantity.fromBigInt(feeAmount), oasisRT.token.NATIVE_DENOMINATION])
-        .setFeeGas(sapphireConfig.feeGas)
-        .setFeeConsensusMessages(1)
-        .setSignerInfo([
-          {
-            address_spec: {
-              signature: { secp256k1eth: signer.public() },
+        // Withdraw into intermediate Consensus
+        const rtw = new oasisRT.consensusAccounts.Wrapper(
+          oasis.misc.fromHex(sapphireConfig.mainnet.runtimeId),
+        ).callWithdraw()
+        rtw
+          .setBody({
+            amount: [oasis.quantity.fromBigInt(amountToWithdraw), oasisRT.token.NATIVE_DENOMINATION],
+            // Don't withdraw to final consensus account directly. Users might input an exchange account
+            // that doesn't recognize withdrawal txs.
+            to: oasis.staking.addressFromBech32(intermediateConsensusAddress),
+          })
+          .setFeeAmount([oasis.quantity.fromBigInt(feeAmount), oasisRT.token.NATIVE_DENOMINATION])
+          .setFeeGas(sapphireConfig.feeGas)
+          .setFeeConsensusMessages(1)
+          .setSignerInfo([
+            {
+              address_spec: {
+                signature: { secp256k1eth: signer.public() },
+              },
+              nonce: await getSapphireNonce(await getEvmBech32Address(sapphireAddress)),
             },
-            nonce: await getSapphireNonce(await getEvmBech32Address(sapphireAddress)),
-          },
-        ])
-      await rtw.sign([new oasis.signature.BlindContextSigner(signer)], chainContext)
-      await rtw.submit(nic)
+          ])
+        await rtw.sign([new oasis.signature.BlindContextSigner(signer)], chainContext)
+        await rtw.submit(nic)
+        setTimeout(poll, 1) // Fetch balances again and it'll trigger next IF
+      } else if (intermediateConsensusBalance > 0n) {
+        console.log('transferable', intermediateConsensusBalance)
+        const amountToTransfer = intermediateConsensusBalance
+
+        // Transfer into final Consensus
+        const tw = oasis.staking.transferWrapper()
+        tw.setNonce(await getConsensusNonce(intermediateConsensusAddress))
+          .setFeeAmount(oasis.quantity.fromBigInt(0n))
+          .setBody({
+              to: oasis.staking.addressFromBech32(consensusAddress),
+              amount: oasis.quantity.fromBigInt(amountToTransfer),
+          })
+        tw.setFeeGas(await tw.estimateGas(nic, intermediateConsensusSigner.public()))
+        await tw.sign(new oasis.signature.BlindContextSigner(intermediateConsensusSigner), chainContext)
+        await tw.submit(nic)
+        setTimeout(poll, 1) // Update balances
+      } else {
+        setTimeout(poll, 10000)
+      }
     } catch (err) {
       console.error(err)
       alert(err)
+      setTimeout(poll, 10000)
     }
-
-    poll()
   }
   poll()
 
@@ -95,6 +127,12 @@ init().catch((err) => {
 })
 
 // Utils
+
+/** @param {Uint8Array} publicKey */
+async function publicKeyToAddress(publicKey) {
+  const data = await oasis.staking.addressFromPublicKey(publicKey)
+  return oasis.staking.addressToBech32(data)
+}
 
 /** @param {`oasis1${string}`} oasisAddress */
 function isValidOasisAddress(oasisAddress) {
