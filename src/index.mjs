@@ -22,6 +22,7 @@ const consensusConfig = {
 }
 const multiplyConsensusToSapphire = 10n ** BigInt(sapphireConfig.decimals - consensusConfig.decimals)
 
+// sapphire (signer) -> consensus (intermediateConsensusSigner) -> target consensus (consensusAddress)
 async function init() {
   const mnemonic = oasis.hdkey.HDKey.generateMnemonic(256)
 
